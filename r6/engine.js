@@ -76,11 +76,10 @@
         if (typeof (b.keywords || {})[L] !== 'string' || kwn(b.keywords[L]) !== kwn(c.keywords[L])) throw new Error('form kw ' + L + ' differs');
         if (txt((b.description || {})[L]) !== txt(c.description[L])) throw new Error('form desc ' + L + ' differs');
       }
-      if (!b.seo_title || !b.seo_description) throw new Error('no seo keys');
-      u.note = 'isdef ' + b.seo_is_default + ', vars ' + (Array.isArray(b.variations) ? b.variations.length : typeof b.variations);
+      u.note = 'isdef ' + b.seo_is_default + ', seo keys ' + (b.seo_title ? 1 : 0) + (b.seo_description ? 1 : 0) + ', vars ' + (Array.isArray(b.variations) ? b.variations.length : typeof b.variations);
       b.name = Object.assign({}, b.name, it.new.name);
-      b.seo_title = Object.assign({}, b.seo_title, it.new.title);
-      b.seo_description = Object.assign({}, b.seo_description, it.new.meta);
+      b.seo_title = Object.assign({}, b.seo_title || {}, it.new.title);
+      b.seo_description = Object.assign({}, b.seo_description || {}, it.new.meta);
       b.seo_is_default = false;
       b.keywords = Object.assign({}, b.keywords, it.new.kw);
       b.description = Object.assign({}, b.description, it.new.desc);
@@ -193,5 +192,5 @@
 
   // Digest of the saved values of every listing (compared with the same digest made locally from the payload).
   R6.digest = async ids => { const out = {}; for (const id of ids) { const c = (await ctx(id)).context; const parts = []; for (const L of L2) parts.push(c.name[L], (c.seo.title || {})[L] || '', (c.seo.description || {})[L] || '', kwn(c.keywords[L]), c.description[L]); for (const v of vlist(c).slice().sort((a, b) => a.id - b.id)) parts.push(String(v.id), v.name_v2.uk, v.name_v2.ru); out[id] = (await sha(parts.join('\u0001'))).slice(0, 12); await sleep(800); } return out; };
-  R6.ver = 'r6-1';
+  R6.ver = 'r6-2';
 })();
