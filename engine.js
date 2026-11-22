@@ -23,8 +23,11 @@ F.init = async P => { F.P = P; await F.put('payload', JSON.stringify(P)); return
 F.restore = async () => { if (!F.P) F.P = JSON.parse(await F.get('payload')); const s = JSON.parse((await F.get('state')) || '{}'); F.done = s.done || {}; F.log = s.log || {}; F.up = s.up || {}; F.skipped = s.skipped || {}; F.softLog = s.soft || []; return 'ready ' + F.P.order.length + ' listings, done ' + Object.keys(F.done).length + ', uploaded ' + Object.keys(F.up).length; };
 F.flat = (o, p = '', out = {}) => { if (o && typeof o === 'object') { const ks = Object.keys(o); if (!ks.length) out[p] = JSON.stringify(o); for (const k of ks) F.flat(o[k], p ? p + '.' + k : k, out); } else out[p] = JSON.stringify(o); return out; };
 F.allow = /^(images|main_image_id|date_modified|urls|variation_data\.variations\.\d+\.(main_image|main_image_id|main_image_url|image|images))(\.|$)/;
-F.soft = /(^|\.)(discount|specs|quantity_in_stock|presence|presence_sure|presence_title|qty|disabled_for_presence_sure)(\.|$)/;
-F.diff = (a, b) => { const A = F.flat(a), B = F.flat(b); const hard = [], soft = []; for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) { if (A[k] === B[k] || F.allow.test(k)) continue; (F.soft.test(k) ? soft : hard).push(k); } return { hard, soft }; };
+F.soft = /(^|\.)(discount|discount_active|specs|quantity_in_stock|presence|presence_sure|presence_title|qty|disabled_for_presence_sure)(\.|$)/;
+// empty string <-> null counts as unchanged (the form sends gtin / mpn "" back as null, 22 Nov);
+// a description that differs only in images.prom.ua addresses (Prom stores an embedded picture under a new address on save) is soft
+F.nimg = v => String(v).replace(/https?:\/\/images\.prom\.ua\/[^"'\s)\\]+/g, 'IMG');
+F.diff = (a, b) => { const A = F.flat(a), B = F.flat(b); const hard = [], soft = []; const nul = v => v === undefined || v === 'null' || v === '""'; for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) { if (A[k] === B[k] || F.allow.test(k) || (nul(A[k]) && nul(B[k]))) continue; if (/(^|\.)description(_text)?\.(uk|ru)$/.test(k) && F.nimg(A[k]) === F.nimg(B[k])) { soft.push(k + '~imgurl'); continue; } (F.soft.test(k) ? soft : hard).push(k); } return { hard, soft }; };
 F.varImgs = c => JSON.stringify(((c.variation_data || {}).variations || []).filter(v => String(v.id) !== String(c.id)).map(v => [v.id, F.ids(v.images)]));
 F.plan = (old, nid, mode) => [String(nid)].concat(mode === 'rep' ? old.slice(1) : old).slice(0, 10);
 F.card = async id => {
@@ -36,13 +39,16 @@ F.card = async id => {
   let j = null; try { j = await u.json(); } catch (x) { } const nid = j && j[0] && j[0].id; if (!nid) throw new Error('upload http ' + u.status + ' ' + JSON.stringify(j).slice(0, 80));
   F.up[id] = String(nid); await F.persist(); return F.up[id];
 };
-F.container = async () => {
+F.container = async () => {   // about:blank container (a /robots.txt container is text/plain: the form never rendered inside it, 22 Nov)
   if (F.box && F.boxLoads < F.CMAX) return F.box.contentDocument;
-  if (F.box) { try { F.box.src = 'about:blank'; } catch (x) { } F.box.remove(); await F.sleep(1500); }
-  const b = document.createElement('iframe'); b.style.cssText = 'position:fixed;left:-6000px;top:0;width:1500px;height:1100px'; b.src = '/robots.txt'; document.body.appendChild(b);
-  for (let i = 0; i < 30 && !(b.contentDocument && b.contentDocument.readyState === 'complete' && b.contentDocument.body); i++) await F.sleep(500);
-  F.box = b; F.boxLoads = 0; F.boxes = (F.boxes || 0) + 1; return b.contentDocument;
+  if (F.box) { try { F.box.src = 'about:blank'; } catch (x) { } F.box.remove(); F.box = null; await F.sleep(1500); }
+  const b = document.createElement('iframe'); b.style.cssText = 'position:fixed;left:-6000px;top:0;width:1500px;height:1100px'; b.src = 'about:blank'; document.body.appendChild(b);
+  await F.sleep(500); F.box = b; F.boxLoads = 0; F.boxes = (F.boxes || 0) + 1; return b.contentDocument;
 };
+// The form fills an empty own SEO title with the default text on save (22 Nov, test 1) -> send the snapshot's own SEO values back.
+F.keepSeo = b => { const sn = F.snapNow; if (!sn || !sn.seo) throw new Error('no snapshot for seo'); const t = sn.seo.title || {}, d = sn.seo.description || {}; if ('seo_title' in b) b.seo_title = Object.assign({}, b.seo_title, { uk: t.uk || '', ru: t.ru || '' }); if ('seo_description' in b) b.seo_description = Object.assign({}, b.seo_description, { uk: d.uk || '', ru: d.ru || '' }); if ('seo_is_default' in b) b.seo_is_default = sn.seo.is_default;
+  const k = sn.keywords; if ('keywords' in b && k) b.keywords = Object.assign({}, b.keywords, { uk: k.uk || '', ru: k.ru || '' });   // the form copies RU phrases into an empty UA field (22 Nov)
+  return b; };
 F.hook = (W, want, onBody, st) => {
   const of = W.fetch;
   W.fetch = async function (u, o) {
@@ -70,7 +76,7 @@ F.save = async (id, oldIds, newIds) => {
     if (!btn) { st.err = 'no save button'; return st; }
     F.hook(fr.contentWindow, u => String(u).includes('/cms/product/v2/save/' + id), s => {
       try { const b = JSON.parse(s); if (JSON.stringify(F.ids(b.images)) !== JSON.stringify(oldIds)) { st.err = 'body images != context'; return null; }
-        b.images = newIds.map(Number); if (b.quantity_in_stock === 0) { b.quantity_in_stock = null; st.q0 = 1; } return JSON.stringify(b); } catch (x) { st.err = 'modify ' + x.message; return null; } }, st);
+        b.images = newIds.map(Number); if (b.quantity_in_stock === 0) { b.quantity_in_stock = null; st.q0 = 1; } F.keepSeo(b); return JSON.stringify(b); } catch (x) { st.err = 'modify ' + x.message; return null; } }, st);
     btn.click();
     for (let i = 0; i < 40 && !st.fin; i++) await F.sleep(1000);
     if (!st.seen) st.err = st.err || 'no save request seen';
@@ -78,9 +84,11 @@ F.save = async (id, oldIds, newIds) => {
   } finally { try { fr.src = 'about:blank'; } catch (x) { } fr.remove(); }
 };
 F.one = async id => {
-  const [first, mode] = F.P.L[id]; const c = await F.ctx(id); F.cur = c; const old = F.ids(c.images); const lg = F.log[id] = F.log[id] || {};
+  const [first, mode] = F.P.L[id]; const c = await F.ctx(id); F.cur = c; F.snapNow = c; const old = F.ids(c.images); const lg = F.log[id] = F.log[id] || {};
   if (F.up[id] && old[0] === F.up[id]) { lg.note = 'already first'; return 'ok'; }
   if (old[0] !== String(first)) { F.skipped[id] = 'first is ' + old[0] + ' not ' + first; return 'skip'; }
+  // Prom copies the RU phrases into an empty UA phrases field on ANY save (server side, 22 Nov on 2565312895) -> skip, owner decides
+  if (!String((c.keywords || {}).uk || '').trim() && String((c.keywords || {}).ru || '').trim()) { F.skipped[id] = 'UA phrases empty (a save copies RU into UA)'; return 'skip'; }
   if (!lg.old) { lg.old = old; await F.put('snap_' + id, JSON.stringify(c)); }
   const nid = await F.card(id); const neu = F.plan(old, nid, mode); lg.new = neu; lg.drop = old.filter(x => !neu.includes(x));
   await F.sleep(1500);
@@ -101,7 +109,9 @@ F.run = async (ids, limit) => {
       if (F.done[id] || F.skipped[id]) continue;
       if (limit && F.state.fin >= limit) break;
       if (F.halt) { F.state.stop = 'halted by hand'; break; }
-      F.state.at = id; const r = await F.one(id); await F.persist();
+      F.state.at = id; let r = await F.one(id); const lg0 = F.log[id] || {};
+      if (r === 'stop' && lg0.status === 'error' && /"errors"/.test(lg0.resp || '')) { F.skipped[id] = 'Prom refused (nothing saved): ' + lg0.resp.slice(0, 120); r = 'skip'; }   // validation refusal, e.g. empty UA description
+      await F.persist();
       if (r === 'stop') { F.state.stop = 'stop at ' + id + ': ' + JSON.stringify(F.log[id]).slice(0, 300); break; }
       if (r === 'ok') { F.done[id] = 1; F.state.fin++; await F.persist(); }
       await F.sleep(2000);
