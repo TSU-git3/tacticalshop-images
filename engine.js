@@ -23,11 +23,14 @@ F.init = async P => { F.P = P; await F.put('payload', JSON.stringify(P)); return
 F.restore = async () => { if (!F.P) F.P = JSON.parse(await F.get('payload')); const s = JSON.parse((await F.get('state')) || '{}'); F.done = s.done || {}; F.log = s.log || {}; F.up = s.up || {}; F.skipped = s.skipped || {}; F.softLog = s.soft || []; return 'ready ' + F.P.order.length + ' listings, done ' + Object.keys(F.done).length + ', uploaded ' + Object.keys(F.up).length; };
 F.flat = (o, p = '', out = {}) => { if (o && typeof o === 'object') { const ks = Object.keys(o); if (!ks.length) out[p] = JSON.stringify(o); for (const k of ks) F.flat(o[k], p ? p + '.' + k : k, out); } else out[p] = JSON.stringify(o); return out; };
 F.allow = /^(images|main_image_id|date_modified|urls|variation_data\.variations\.\d+\.(main_image|main_image_id|main_image_url|image|images))(\.|$)/;
-F.soft = /(^|\.)(discount|discount_active|specs|quantity_in_stock|presence|presence_sure|presence_title|qty|disabled_for_presence_sure)(\.|$)/;
+F.soft = /(^|\.)(discount|discount_active|specs|quantity_in_stock|presence|presence_sure|presence_title|qty|disabled_for_presence_sure|is_moderated|is_moderated_category)(\.|$)/;   // category moderation flag is Prom's category data (22 Nov)
 // empty string <-> null counts as unchanged (the form sends gtin / mpn "" back as null, 22 Nov);
 // a description that differs only in images.prom.ua addresses (Prom stores an embedded picture under a new address on save) is soft
 F.nimg = v => String(v).replace(/https?:\/\/images\.prom\.ua\/[^"'\s)\\]+/g, 'IMG');
 F.diff = (a, b) => { const A = F.flat(a), B = F.flat(b); const hard = [], soft = []; const nul = v => v === undefined || v === 'null' || v === '""'; for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) { if (A[k] === B[k] || F.allow.test(k) || (nul(A[k]) && nul(B[k]))) continue; if (/(^|\.)description(_text)?\.(uk|ru)$/.test(k) && F.nimg(A[k]) === F.nimg(B[k])) { soft.push(k + '~imgurl'); continue; } (F.soft.test(k) ? soft : hard).push(k); } return { hard, soft }; };
+// attribute order inside a variation row can change on save (same values, 22 Nov on 3256114571) -> compare sorted by name
+F.norm = c => { const x = JSON.parse(JSON.stringify(c)); for (const v of ((x.variation_data || {}).variations || [])) if (Array.isArray(v.attrs)) v.attrs.sort((p, q) => String(p.name).localeCompare(String(q.name))); return x; };
+F.diffRaw = F.diff; F.diff = (a, b) => F.diffRaw(F.norm(a), F.norm(b));
 F.varImgs = c => JSON.stringify(((c.variation_data || {}).variations || []).filter(v => String(v.id) !== String(c.id)).map(v => [v.id, F.ids(v.images)]));
 F.plan = (old, nid, mode) => [String(nid)].concat(mode === 'rep' ? old.slice(1) : old).slice(0, 10);
 F.card = async id => {
@@ -87,8 +90,10 @@ F.one = async id => {
   const [first, mode] = F.P.L[id]; const c = await F.ctx(id); F.cur = c; F.snapNow = c; const old = F.ids(c.images); const lg = F.log[id] = F.log[id] || {};
   if (F.up[id] && old[0] === F.up[id]) { lg.note = 'already first'; return 'ok'; }
   if (old[0] !== String(first)) { F.skipped[id] = 'first is ' + old[0] + ' not ' + first; return 'skip'; }
-  // Prom copies the RU phrases into an empty UA phrases field on ANY save (server side, 22 Nov on 2565312895) -> skip, owner decides
-  if (!String((c.keywords || {}).uk || '').trim() && String((c.keywords || {}).ru || '').trim()) { F.skipped[id] = 'UA phrases empty (a save copies RU into UA)'; return 'skip'; }
+  // Prom fills an empty language side of phrases / packaging text on ANY save (server side: RU phrases copied into UA, RU packaging
+  // machine-translated from UA; a 2nd save with the side empty does not undo it; 22 Nov on 2565312895, 1800305449) -> skip, owner decides
+  const os = ['keywords', 'packaging', 'description'].filter(f => { const o = c[f] || {}; return (!String(o.uk || '').trim()) !== (!String(o.ru || '').trim()); });
+  if (os.length) { F.skipped[id] = 'one language empty in ' + os.join('+') + ' (a save makes Prom fill it)'; return 'skip'; }
   if (!lg.old) { lg.old = old; await F.put('snap_' + id, JSON.stringify(c)); }
   const nid = await F.card(id); const neu = F.plan(old, nid, mode); lg.new = neu; lg.drop = old.filter(x => !neu.includes(x));
   await F.sleep(1500);
